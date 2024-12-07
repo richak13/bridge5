@@ -44,15 +44,79 @@ def getContractInfo(chain):
 
 def scanBlocks(chain):
     """
-        chain - (string) should be either "source" or "destination"
-        Scan the last 5 blocks of the source and destination chains
-        Look for 'Deposit' events on the source chain and 'Unwrap' events on the destination chain
-        When Deposit events are found on the source chain, call the 'wrap' function the destination chain
-        When Unwrap events are found on the destination chain, call the 'withdraw' function on the source chain
+    Scan the last 5 blocks of the source and destination chains
+    Look for 'Deposit' events on the source chain and 'Unwrap' events on the destination chain
+    When Deposit events are found on the source chain, call the 'wrap' function on the destination chain
+    When Unwrap events are found on the destination chain, call the 'withdraw' function on the source chain
     """
+    try:
+        if chain == 'source':
+            w3 = connectTo('avax')
+            contracts = getContractInfo('source')
+        elif chain == 'destination':
+            w3 = connectTo('bsc')
+            contracts = getContractInfo('destination')
+        else:
+            raise ValueError(f"Invalid chain: {chain}")
+        
+        contract = w3.eth.contract(
+            address=w3.toChecksumAddress(contracts['address']),
+            abi=contracts['abi']
+        )
+        warden_key = contracts['warden_key']
 
-    if chain not in ['source','destination']:
-        print( f"Invalid chain: {chain}" )
-        return
-    
-        #YOUR CODE HERE
+        # Get the latest block
+        latest_block = w3.eth.block_number
+
+        # Iterate through the last 5 blocks
+        for block_number in range(latest_block - 5, latest_block + 1):
+            block = w3.eth.get_block(block_number, full_transactions=True)
+
+            # Iterate through transactions in the block
+            for tx in block['transactions']:
+                receipt = w3.eth.get_transaction_receipt(tx['hash'])
+
+                # Decode logs
+                for log in receipt['logs']:
+                    try:
+                        decoded_event = contract.events.Deposit().processLog(log)
+                        # Call 'wrap' on the destination chain
+                        destination_contract = connectTo('bsc').eth.contract(
+                            address=w3.toChecksumAddress(getContractInfo('destination')['address']),
+                            abi=getContractInfo('destination')['abi']
+                        )
+                        wrap_tx = destination_contract.functions.wrap(
+                            decoded_event['args']['token'],
+                            decoded_event['args']['amount']
+                        ).buildTransaction({
+                            'from': warden_key,
+                            'nonce': w3.eth.getTransactionCount(w3.toChecksumAddress(warden_key)),
+                        })
+                        signed_tx = w3.eth.account.sign_transaction(wrap_tx, warden_key)
+                        w3.eth.sendRawTransaction(signed_tx.rawTransaction)
+                        print("Successfully processed Deposit event and called wrap on destination chain")
+
+                    except Exception:
+                        try:
+                            decoded_event = contract.events.Unwrap().processLog(log)
+                            # Call 'withdraw' on the source chain
+                            source_contract = connectTo('avax').eth.contract(
+                                address=w3.toChecksumAddress(getContractInfo('source')['address']),
+                                abi=getContractInfo('source')['abi']
+                            )
+                            withdraw_tx = source_contract.functions.withdraw(
+                                decoded_event['args']['token'],
+                                decoded_event['args']['amount']
+                            ).buildTransaction({
+                                'from': warden_key,
+                                'nonce': w3.eth.getTransactionCount(w3.toChecksumAddress(warden_key)),
+                            })
+                            signed_tx = w3.eth.account.sign_transaction(withdraw_tx, warden_key)
+                            w3.eth.sendRawTransaction(signed_tx.rawTransaction)
+                            print("Successfully processed Unwrap event and called withdraw on source chain")
+
+                        except Exception as e:
+                            print(f"Error processing logs: {e}")
+
+    except Exception as e:
+        print(f"Error in scanBlocks: {e}")
